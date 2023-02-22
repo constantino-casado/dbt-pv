@@ -1,0 +1,16 @@
+{
+    "eventTime": "2023-02-20T19:08:40.765586+00:00",
+    "eventType": "START",
+    "inputs": [],
+    "job": {
+        "facets": {},
+        "name": "dbt-run-firstdemo",
+        "namespace": "dbt"
+    },
+    "outputs": [],
+    "producer": "https://ADB-fqdn/dbt/v0.1",
+    "run": {
+        "facets": {},
+        "runId": "05640115-33be-4119-b407-248bdc976d47"
+    }
+}
