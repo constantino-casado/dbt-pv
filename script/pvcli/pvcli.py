@@ -9,12 +9,15 @@ from typing import Union, Type, Optional, Dict, List
 from pvcli.run import RunEvent, RunState, Run, Job
 import logging
 import asyncio
+import yaml
+
 
 from azure.eventhub.aio import EventHubProducerClient
 from azure.eventhub import EventData
 
+
 async def send2eventhub(Events: List):
-    Connstr=os.environ.get("CONNECTION_STR")
+    Connstr = os.environ.get("CONNECTION_STR")
     Ev_name = os.environ.get("EVENTHUB_NAME")
     if Ev_name:
         producer = EventHubProducerClient.from_connection_string(conn_str=Connstr, eventhub_name=Ev_name)
@@ -54,6 +57,7 @@ class PurviewClient():
         self.account = os.environ.get("PURVIEW_NAME") 
         self.transport = transport
         self.token = self.getToken()
+        self.api = f"https://{self.account}.purview.azure.com/catalog/api/"
         return
     def getToken(self):
         client_id = os.environ.get("AZURE_CLIENT_ID") 
@@ -66,53 +70,146 @@ class PurviewClient():
         'Content-Type': 'application/x-www-form-urlencoded'
         }
         response = requests.request("POST", url, headers=headers, data=payload)
-        print(response.text)
-        self.token = json.loads(response.text)['access_token']
+        # print(json.loads(response.text)['access_token'])
+        return json.loads(response.text)['access_token']
+
+
+    
+    def send2pv(self,processor):
+        itemlist = self.buildpvdata(processor)
+        products = processor.loadproducts()
+        for item in itemlist:
+            attributes = {}
+            outputentity = {}
+            attributes['qualifiedName'] = item['fqn']
+            outputentity['typeName'] = item['type']
+            attributes['name'] = item['name']
+            attributes['description'] = f"dbt process to generate the model: {item['model']}"
+            outputentity['attributes'] = attributes
+            outguid = self.getentityguid(outputentity)
+            if outguid == -1:
+                outputentity['guid'] = '-1'
+                outguid = self.writeentity(outputentity)['guidAssignments']['-1']
+            inputguids = []
+            for entity in item['inputs']:
+                iguid = self.getentityguid(entity)
+                if iguid == -1:
+                    entity['guid'] = '-1'
+                    iguid = self.writeentity(entity)['guidAssignments']['-1']
+                inputguids.append({"guid":iguid})
+            # print("-----------input------------")
+            # print(json.dumps(item['inputs']))
+            attributes = {}
+            pvprocess = {}
+            attributes['qualifiedName'] = f"dbtprocess-{item['package']}-{item['target']}-{item['model']}"
+            pvprocess['typeName'] = 'databricks_process'
+            attributes['name'] = f"dbtprocess-{item['package']}"
+            attributes['description'] = f"dbt process to generate the model: {item['model']}"
+            attributes['inputs'] = inputguids
+            attributes['outputs'] = [{"guid":outguid}]
+            pvprocess['attributes'] = attributes
+            pvprocess['guid'] = '-1'
+            # print(json.dumps(pvprocess))
+            procguid = self.writeentity(pvprocess)['guidAssignments']['-1']
+            guids2link= attributes['inputs']+attributes['outputs']+[{"guid":procguid}]
+            for link in guids2link:
+                link['relationshipType'] = "Product_Referenceable_Groups"
+            print(item['name'])
+            print(products.keys())
+            if item['name'].lower() in products.keys():
+                attributes = products[item['name'].lower()]
+                attributes['qualifiedName'] = f"dbtproduct-{item['package']}-{item['model']}"
+                entity = {}
+                entity['attributes'] = attributes
+                entity['typeName'] = "Purview_Product"
+                relationshipAttributes = {}
+                relationshipAttributes['Groups_Referenceable'] = guids2link
+                entity['relationshipAttributes'] = relationshipAttributes
+                result = self.writeentity(entity)
+                print(result)
+            #['mutatedEntities']['CREATE'][0]['guid']
+        # at this point we have a list of 
         return
     
-    def sendpvdata(self, nodes, sources, child_map):
+    def buildpvdata(self, processor):
+        nodes = processor.nodes
+        sources = processor.sources
         itemlist = []
         entity = {}
-        for item in nodes:
-            entity['model'] = item.keys()[0]
+            #Ideally we must capture package and environment from elsewhere - TBD
+        
+        for key,item in nodes.items():
+            package = item['package_name']
+            target = processor.target
+            myhost = processor.host
+            entity['package'] = package
+            entity['target'] = target
+            entity['model'] = item['alias']
             entity['name'] = item['name']
             entity['id'] = item['unique_id']
             entity['description'] = item['description']
-            entity['compiled_code'] = item['compiled_code']
+            entity['process_code'] = item['compiled_code']
+            entity['fqn'] = item['schema']+item['name']+'@'+myhost
+            if "azuredatabricks.net" in myhost:
+                entity['type'] = 'hive_table'
+            # must be complitted with types available and defined in the script STORE literals
             inputs = []
-            source = {}
             for input in  item['depends_on']['nodes']:
+                source = {}
+                attributes = {}
+                source['attributes'] = attributes
                 sourcedict = sources[input]
-                source['name']=sourcedict['name']
-                source['fqn']=sourcedict['identifier']
-                source['relation_name']=sourcedict['relation_name']
+                attributes['name'] = sourcedict['name']
+                myfqn = sourcedict['identifier']
+                if myfqn.split('://')[0] == 'abfss':
+                    temp =  myfqn.split('://')[1].split('@')
+                    filepath = temp[1].split('/',1)
+                    attributes['qualifiedName'] = 'https://'+filepath[0]+'/'+temp[0]+'/'+filepath[1]
+                    if filepath[1][-1] == '/':
+                        source['typeName'] = "azure_datalake_gen2_path"
+                    else:
+                        source['typeName'] = "azure_datalake_gen2_object"
+                else:
+                    attributes['qualifiedName'] = myfqn
+                    source['typeName'] = entity['type']
+                #source['relation_name']=sourcedict['relation_name']
                 inputs.append(source)
             entity['inputs'] = inputs
             itemlist.append(entity)
-        return
+        return itemlist
+    
+    def getentityguid(self, node):
+        #GET {Endpoint}/catalog/api/atlas/v2/entity/uniqueAttribute/type/{typeName}?minExtInfo={minExtInfo}&ignoreRelationships={ignoreRelationships}&attr:qualifiedName={attr:qualifiedName}
+        url = f"{self.api}atlas/v2/entity/uniqueAttribute/type/{node['typeName']}?minExtInfo={{minExtInfo}}&ignoreRelationships={{ignoreRelationships}}&attr:qualifiedName={{{node['attributes']['qualifiedName']}}}" 
+        headers = {"Authorization": f"Bearer {self.token}", 'Content-Type': 'application/json'}
+        request = requests.get(url, headers=headers)
+        # print('----------requests for guid------------')
+        # print(request.text)
+        try:
+            guid = json.loads(request.text)['entity']['guid']
+            return guid
+        except:
+            return -1
+
+    def writeentity(self, node):
+        # POST {Endpoint}/catalog/api/atlas/v2/entity/bulk
+        #
+        payload = f'{{"referredEntities": {{}}, "entities": [{json.dumps(node)}]}}'
+        #url = f"{self.api}atlas/v2/entity/bulk"
+        collection = "purview-con"
+        url = f"{self.api}collections/{collection}/entity/bulk?api-version=2022-03-01-preview"
+        headers = {"Authorization": f"Bearer {self.token}",
+                   'Content-Type': 'application/json'}
+        response = requests.request("POST", url, headers=headers, data=payload)
+        print('------response from writeentity() function-----')
+        print(response.text)
+        print("---------------------end-----------------------")
+        return json.loads(response.text)
+    
+    def readproducts(self, node):
         
-    def emitxx(self,event):
-        entries = []
-        baseurl = ""
-        db = ""
-        headers = {"Authorization": f"Bearer {self.token}"}
-        constructed_url = baseurl + f"/databases/{db}/tables?api-version=2021-04-01"
-        request = requests.get(constructed_url, headers=headers)
-        response = request.json()
-        results = []
-        for item in response['items']:
-            if item['type'] == 'TABLE':
-                results.append("placeholder")
-        self.schemaDic = results
-        for table in self.schemaDic:
-            # This case/switch like looks for some string in the name to identify the nature of some tables. 
-            # The transaction like should be high freq events. 
-            # type and categories should be like 100 times smaller. 
-            # Other tables will be in between
-            colcount,skcount = 0,0
-            pkname = ""
-            sknames = []
-        return
+        return 
+
 
     def createtypes(self, dtype, table, name, dlength, dfix):
         global seed
@@ -136,8 +233,8 @@ class PurviewClient():
         if isinstance(self.transport,PurviewTransport):
             for eventjson in self.transport.session:
                 eventn += 1
-                print(f"----Event {eventn} ----")
-                print(eventjson)
+                # print(f"----Event {eventn} ----")
+                # print(eventjson)
                 f = open(f'data_{eventn}.json', 'w',encoding='utf-8')
                 f.write(eventjson)
                 f.close()
@@ -248,7 +345,7 @@ class DefaultTransportFactory(TransportFactory):
         client_secret = os.environ.get("AZURE_CLIENT_SECRET")
         tenant_id = os.environ.get("AZURE_TENANT_ID")
         purviewname = os.environ.get("PURVIEW_NAME") 
-        # OPENLINEAGE_URL and OPENLINEAGE_API_KEY
+        # Purview URL and a Service principal with permissions on purview account
         config = {"url": f"https://{purviewname}.catalog.purview.azure.com/",
             "auth": {
                 "type": "service_principal",

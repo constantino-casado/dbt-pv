@@ -141,7 +141,6 @@ def main():
 
     # Failed start event emit should not stop dbt command from running.
     try:
-        print(f"--------Start event-------\r\n{start_event}")
         client.emit(event=start_event)
     except Exception as e:
         logger.warning("OpenLineage client failed to emit start event. Exception: %s", e)
@@ -189,8 +188,9 @@ def main():
         total=len(events) + 2,
     ):
         client.emit(event)
+    client.send2pv(processor)
     # client.debug()
-    print(json.dumps(processor.sources))
+    # print(json.dumps(processor.sources))
     logger.info(f"Emitted {len(events) + 2} lineage events")
 
 

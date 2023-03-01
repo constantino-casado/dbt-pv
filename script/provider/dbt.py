@@ -6,6 +6,7 @@ import os
 import uuid
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, TypeVar
+from fnmatch import fnmatch
 
 import attr
 import yaml
@@ -198,7 +199,8 @@ class DbtArtifactProcessor:
         self.nodes = {}
         self.sources = {}
         self.child_map = {}
-
+        self.host = ""
+        
         self.job_namespace = job_namespace
         self.dataset_namespace = ""
         self.skip_errors = skip_errors
@@ -258,7 +260,7 @@ class DbtArtifactProcessor:
             self.target = profile['target']
 
         profile = profile['outputs'][self.target]
-
+        self.host = profile['host']
         self.extract_adapter_type(profile)
         self.extract_dataset_namespace(profile)
 
@@ -282,7 +284,17 @@ class DbtArtifactProcessor:
         if self.command in ['test', 'build']:
             events += self.parse_test(context, nodes)
         return events
-
+    
+    def loadproducts(self):
+        products = {}
+        folder = os.path.join(self.dir, 'products')
+        for file in os.listdir(folder):
+            if fnmatch(file,"*.prod"):
+                with open(os.path.join(folder,file)) as prodfile:
+                    product = json.loads(prodfile.read())
+                    products.update(product)
+        return products
+    
     @classmethod
     def load_metadata(
         cls,
