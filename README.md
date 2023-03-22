@@ -32,6 +32,9 @@ The following are requisites to make dbt and purview APIs work
 The script will run manually or triggered by some flavour of tool, orchestrator, or similar. 
 
 ## Script parameters
+
 target => '-t', '--target'
+
 project_dir => '--project-dir' || default value = './'
+
 profile_name => '--profile'
